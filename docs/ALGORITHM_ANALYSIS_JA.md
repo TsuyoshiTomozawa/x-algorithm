@@ -4,6 +4,8 @@
 
 記載している数値はすべて、本リポジトリ内のコードに書かれた**本番デフォルト値**（`home-mixer/params/param.rs` などにcronで同期されている値）に基づいています。実際の配信では実験（A/Bテスト）により一部ユーザーで異なる値が使われることがあります。
 
+> 📘 **技術的な背景を必要としない実践的なまとめは [BEST_PRACTICES_JA.md](BEST_PRACTICES_JA.md) にあります。**（連投の間隔、引用ツイートの扱い、記事・動画・リンクの有効性などをQ&A形式で解説）
+
 ## 目次
 
 - [1. 全体像](#1-全体像--for-youはリクエストごとに組み立てられる)
@@ -160,6 +162,21 @@ fn bidirectional_boost_eligible(candidate: &PostCandidate) -> bool {
 
 **条件の厳しさが最重要ポイント**：リプライ投稿・リポストには適用されません。**相互フォロー相手の「オリジナル投稿」のみ**が対象です。
 
+#### 引用ツイートはオリジナル投稿として扱われる
+
+判定条件は `in_reply_to_tweet_id` と `retweeted_tweet_id` が両方 `None` であることだけで、`quoted_tweet_id` は見ていません。したがって **引用ツイートはブースト対象に含まれます**。
+
+同じ判定構造が他の3箇所でも使われています。
+
+| 仕組み | 判定 | 引用ツイート |
+| --- | --- | --- |
+| 相互フォローブースト | `bidirectional_boost_eligible()` | ✅ 対象 |
+| OON割引（×0.75） | `oon_applies()` は `in_reply_to` / `retweeted` のみ判定 | ✅ 減点されない |
+| 新規著者コールドスタート | `cold_start_base_eligible()` | ✅ 対象 |
+| `OONRetweetReplyFilter` | リポストとリプライのみ除外 | ✅ 除外されない |
+
+> **リポストと引用ツイートは、コード上まったく別物として扱われます。** リポストは ×0.75 かつ全ブースト対象外、引用ツイートはオリジナル投稿と同等です。
+
 ### (B) 著者多様性ディケイ
 
 同じ著者の投稿が候補に複数あると、2件目以降が減衰します。
@@ -234,6 +251,20 @@ k はスコア順にソートした結果で数えられるため、**同じ著�
 | `VideoFilter` / `TopicIdsFilter` | リクエスト条件に合わないもの |
 | `NewUserMinEngagementFilter` | 新規ユーザー向け、エンゲージメント閾値未満の OON 投稿 |
 | `InventoryHoldoutFilter` | 実験用に決定論的に一定割合を除外 |
+
+なお `PreviouslySeenPostsFilter` は、投稿ID本体に加えて **リポスト元・リプライ親のID**（`related_post_ids_iter()`）も既読判定の対象にします。閲覧者が既に見た投稿は候補から消えるため、**著者多様性ディケイの `k` にも数えられません**。これが「投稿間隔を空けると共食いを避けられる」ことの実装上の根拠です。
+
+### 選択後フィルタ
+
+| フィルタ | 除外するもの |
+| --- | --- |
+| `VFFilter` | 可視性フィルタが drop と答えた投稿 |
+| `AncillaryVFFilter` | **親・引用元・リポスト元が drop された投稿** |
+| `DedupConversationFilter` | 同一会話の別ブランチ |
+
+`AncillaryVFFilter` の判定ロジック（[`home-mixer/candidate_hydrators/vf_candidate_hydrator.rs`](../home-mixer/candidate_hydrators/vf_candidate_hydrator.rs) の `should_drop_ancillary()`）は、**スレッドの祖先投稿・引用元投稿・リポスト元投稿のいずれかが drop 判定なら、その投稿自体を drop** します。
+
+> 実務上の意味：**非表示判定を受けているアカウントを引用すると、引用した側の投稿ごと配信されなくなります。** 問題のあるアカウントを批判目的で引用する行為は、自分の配信を止める結果になります。
 
 ### 可視性フィルタ（[`visibility-filtering/rules/registry.rs`](../visibility-filtering/rules/registry.rs)）
 
