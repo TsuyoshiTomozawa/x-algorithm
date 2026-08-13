@@ -252,6 +252,62 @@ k はスコア順にソートした結果で数えられるため、**同じ著�
 | `NewUserMinEngagementFilter` | 新規ユーザー向け、エンゲージメント閾値未満の OON 投稿 |
 | `InventoryHoldoutFilter` | 実験用に決定論的に一定割合を除外 |
 
+#### リプライ投稿の可視範囲 — 2つのフィルタの合成
+
+リプライ投稿には、`home-mixer/filters/` の中で2つのフィルタが順に効きます。
+
+**① `OONRetweetReplyFilter`**
+
+```rust
+(c.in_network == Some(false) && (is_retweet || is_reply)) || (is_reply && c.ancestors.is_empty())
+```
+
+閲覧者がフォローしていない著者（`in_network == false`）のリプライとリポストを除外します。
+
+**② `SelfReplyChainFilter`**
+
+```rust
+// 自分以外の最初の祖先ユーザー = 実質的なリプライ先
+match candidate.ancestor_users.iter().copied().find(|uid| *uid != self_id) {
+    Some(effective_directed_at) => allowed_users.contains(&effective_directed_at),
+    None => true,   // 純粋な自己スレッドは通す
+}
+```
+
+`allowed_users` は「閲覧者のフォローリスト＋閲覧者自身」。つまり**リプライ先の相手を閲覧者がフォローしていなければ除外**されます。
+
+**合成した結果：**
+
+| 投稿 | For You に表示される条件 |
+| --- | --- |
+| リプライ投稿 | 閲覧者が**著者とリプライ先の両方**をフォローしている |
+| 自己スレッドの続き | 閲覧者が著者をフォローしている（②は `None` で通過） |
+| リポスト | 閲覧者が著者をフォローしている |
+| オリジナル投稿・引用 | 制限なし（フォロー外の候補にもなる） |
+
+> **実務上の意味**：「影響力の大きいアカウントにリプライして、その相手のフォロワーに見てもらう」という導線は、**For You タイムライン上では成立しません**。相手のフォロワーであっても、リプライした本人をフォローしていなければ表示されません。フォロー外への新規リーチが発生するのは、**オリジナル投稿と引用ツイートだけ**です。
+>
+> （会話画面を直接開いた場合の表示は home-mixer の管轄外であり、本リポジトリからは判断できません）
+
+#### 相互フォローブーストが「新規リーチ」に効かない理由
+
+[`home-mixer/candidate_hydrators/bidirectional_follow_hydrator.rs`](../home-mixer/candidate_hydrators/bidirectional_follow_hydrator.rs) の処理順序：
+
+```rust
+// ① 候補の著者のうち、閲覧者がフォローしている者に絞る
+let followed_authors = candidates.iter().map(|c| c.author_id)
+    .filter(|a| following.contains(&(*a as i64)))...;
+
+// ② その中で、閲覧者をフォローし返している者を問い合わせる
+let mutual = socialgraph_client.check_followed_by(query.user_id, &followed_authors).await;
+```
+
+①の時点で **`in_network` の候補しか残りません**。したがってブーストは定義上、**すでに著者をフォローしている閲覧者のフィード内でのみ**発火します。フォロー外への配信量には影響しません。
+
+またブーストが変更するのは `reply_weight_for()` が返す**重みのみ**で、`P(reply)` は Phoenix がその閲覧者の行動履歴から予測します。リプライ確率がほぼ 0 の相手では `20.0 × ≈0 ≈ 0` となり、ブーストは実質的に発火しません。**既存の親和性を増幅する仕組みであり、親和性を生成する仕組みではありません。**
+
+---
+
 なお `PreviouslySeenPostsFilter` は、投稿ID本体に加えて **リポスト元・リプライ親のID**（`related_post_ids_iter()`）も既読判定の対象にします。閲覧者が既に見た投稿は候補から消えるため、**著者多様性ディケイの `k` にも数えられません**。これが「投稿間隔を空けると共食いを避けられる」ことの実装上の根拠です。
 
 ### 選択後フィルタ
