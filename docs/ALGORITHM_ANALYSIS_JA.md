@@ -12,6 +12,7 @@
 - [2. スコアの中身](#2-スコアの中身--実際の重み)
 - [3. スコア補正の仕掛け](#3-スコア補正の4つの仕掛け)
 - [4. フィルタリング](#4-フィルタリング--シャドウバンの実体)
+- [4.5 取得インデックスの階層](#45-取得インデックスの階層--フォロー外に出るための入口)
 - [5. ラベルはどう付くか](#5-ラベルはどう付くか-labeling-path)
 - [6. アカウントを伸ばす方法](#6-アカウントを伸ばす方法コードから導かれる結論)
 - [7. まとめ](#7-一行でまとめると)
@@ -356,6 +357,72 @@ DO_NOT_AMPLIFY_NON_FOLLOWER_USER_DROP
 - **同じ投稿が、フォロワーには表示され、フォロー外のおすすめでは落とされる**
 
 > 「投稿は普通に見えているのに、リーチだけが伸びない」現象のコード上の実体がこれです。
+
+---
+
+## 4.5 取得インデックスの階層 — フォロー外に出るための入口
+
+ここまでは「候補になった投稿がどう並ぶか」の話でした。その手前に、**そもそも候補になれるか**を決める層があります。
+
+[`phoenix-rankall-strato/columns/phoenix_rank_all/phoenixRankAllCandidateProcessor.strato`](../phoenix-rankall-strato/columns/phoenix_rank_all/phoenixRankAllCandidateProcessor.strato) が、投稿を**名前付きの取得インデックス**に登録しています。
+
+### 登録前の門番
+
+```
+isCommunityPost                  → numSkippedCommunity → 登録しない
+isReply                          → numSkippedReplies   → 登録しない
+isRepost                         → numSkippedReposts   → 登録しない
+shouldDropPostByVF || isAdultPost → numSkippedPosts    → 登録しない
+```
+
+**リプライとリポストは、フォロー外向けの取得インデックスに一切登録されません。** home-mixer 側のフィルタ（`OONRetweetReplyFilter`）と合わせて、**二重に**フォロー外配信から締め出されていることになります。
+
+`shouldDropPostByVF` は可視性フィルタを **`TimelineHomeRecommendations`** のセーフティレベルで呼び出します。
+
+```rust
+#<visibility/xai/shouldDropTweet>
+  .fetch(postId, { safetyLevel = TimelineHomeRecommendations }).v
+```
+
+> つまり**おすすめ用のドロップ判定は、配信時だけでなくインデックス登録時にも適用**されます。ラベルの付いた投稿は、候補プールに入る前の段階で弾かれます。
+
+### インデックスの種類と閾値
+
+| インデックス | 登録条件 |
+| --- | --- |
+| `post_creation` | 投稿された時点（いいね不要） |
+| `1fav` | **いいね 1 以上** |
+| `1fav` トピック別 | いいね 1 以上（トピック実験オプションごとに別インデックス） |
+| `32fav` | **いいね 32 以上** |
+| `search_unfiltered` | いいね 1 以上、かつコミュニティ投稿・リポストでない |
+| `video` / `imagine` | いいね起点＋没入型動画あり |
+| `evergreen_video` / `nsfw_video` 系 | 動画・成人向けの別系統 |
+
+```
+def build32FavIndex(candidate, stats) {
+  if (ec.favoriteCount.getOrElse(0) >= 32) { ... indexName = "32fav" ... }
+}
+def build1FavIndex(candidate, stats) {
+  if (ec.favoriteCount.getOrElse(0) >= 1) { ... indexName = "1fav" ... }
+}
+```
+
+🟡 **推論**：`32fav` は母集団が桁違いに小さくなるため、Phoenix retrieval が返す近傍数百件に入る確率が `1fav` より大幅に高いと考えられます（インデックスごとの実サイズはコードからは分かりません）。
+
+### 再インデックスのトリガー
+
+[`phoenix-rankall-strato/columns/favoriteEventProcessor.strato`](../phoenix-rankall-strato/columns/favoriteEventProcessor.strato) は、いいねが入るたびに再インデックスのイベントを発行します。説明文には「**power-of-two favorite-count thresholds によって投稿ごとにレート制限される**」とあります。
+
+[`lib/eventProcessing.strato`](../phoenix-rankall-strato/lib/eventProcessing.strato) の制約：
+
+| 定数 | 値 | 意味 |
+| --- | --- | --- |
+| `maxTweetAge` | 49 時間 | これを超えた投稿は再インデックスされない |
+| `maxTimeSinceFirstUpdate` | 48 時間 | 最初の更新から48時間で打ち切り |
+| `minTimeSinceLatestUpdate` | 1 分 | 更新は最短1分間隔 |
+| `minEngagements` | 32 | `checkPassMinFavCount` の閾値（公開ファイル内に利用箇所はなし） |
+
+> **実務上の意味**：投稿直後のいいねほど、インデックス更新の階段を早く上らせます。48時間の窓を過ぎると、どれだけ反応が付いても再インデックスされません。
 
 ---
 
