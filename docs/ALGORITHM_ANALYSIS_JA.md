@@ -440,6 +440,40 @@ def build1FavIndex(candidate, stats) {
 | [`botmaker/`](../botmaker/) / [`scarecrow/`](../scarecrow/) | イベント発生時にルールベースでラベルを付与 |
 | [`abuse-enforcement-service/`](../abuse-enforcement-service/) | モデルスコアに基づきラベル付与・チャレンジ・凍結を実行 |
 
+### user-cred-v2 の PageRank は Premium アカウントを種にしている
+
+[`user-cred-v2/UserCredV2App.scala`](../user-cred-v2/UserCredV2App.scala) のテレポート（事前分布）の構築部分：
+
+```scala
+val normalizedUniform = getNormalizedUserMassPipe(
+  validUserInfoPipe.filter(u => !u.isNearZero && u.isPremium).map(u => UserMass(u.id, 1.0))
+)
+
+val blended = // (1.0 - beta) * uniform + beta * engagement
+```
+
+初期質量 `1.0` が与えられるのは **`isPremium` かつ `isNearZero` でないアカウントのみ**です。
+
+```scala
+// ValidUserInfo.scala
+def isPremium: Boolean =
+  isBlueVerified || isGrayVerified || isGoldVerified || isVerifiedOrg || isVOAffiliate
+```
+
+`engagement_teleport_beta` のデフォルトは `0.5` なので、**事前分布の半分が Premium アカウントに均等配分**され、残り半分がエンゲージメント加重で配られます。最終的なスコアは対数変換されて 0〜100 に丸められます。
+
+```scala
+// UserCredV2.scala
+val rawScore = if (mass <= 0) 0.0 else ScoreIntercept + ScoreSlope * scala.math.log(mass)
+val score = (rawScore max 0.0) min 100.0
+```
+
+**この値の用途はランキングではありません。** パッケージは `com.twitter.health.platform_manipulation` で、本 README の分類でも Content Understanding（可視性フィルタが読むスコアとラベルを生成する系統）に置かれています。
+
+なお home-mixer 側では、`subscription_level` は [`util/feed_log.rs`](../home-mixer/util/feed_log.rs)・[`side_effects/response_stats_side_effect.rs`](../home-mixer/side_effects/response_stats_side_effect.rs)・[`side_effects/ads_injection_logging_side_effect.rs`](../home-mixer/side_effects/ads_injection_logging_side_effect.rs) の**ログと統計にしか現れず**、`scorers/` と `params/param.rs` には課金・認証に関するパラメータが一切存在しません。
+
+> **まとめ**：課金はランキングスコアを一切変更しませんが、信用スコアの計算では出発点になります。順位への加点ではなく、**不正判定の受けにくさ**として効く設計です。
+
 ### agatha の比率設計が示すこと
 
 分母が「いいね」、分子が「ブロック・通報」であるため、**インプレッションを稼いでもいいねが伴わず、代わりにブロックや通報が増えるような投稿は、比率が悪化してアカウントラベルが付きます**。
